@@ -17,7 +17,7 @@ import datetime
 #     print(f"Connection from {client_address}")
 
 ENCODE = 'UTF-8'
-ALL_USERS = {} # dict of users, of form username: client_socket, CRITICAL SECTION
+ALL_USERS: dict[str, socket.socket] = {} # dict of users, of form username: client_socket, CRITICAL SECTION
 LOCK = threading.Lock() # lock for multithreading synchronization
 MAIN_GROUP = Group.Group() # initialize group
 
@@ -34,25 +34,32 @@ def main():
     port = 6789 # Port to listen on
     th = 5 # backlog, "number of unaccepted connections that the system will allow before refusing new connections"
 
-    server_socket.bind((host, port)) # bind to port
+    try:
+        server_socket.bind((host, port)) # bind to port
+        server_socket.listen(th) # open server socket for listening
+        print(f"Server listening on {host}:{port}")
 
-    server_socket.listen(th) # open server socket for listening
-    print(f"Server listening on {host}:{port}")
+        while True:    # Wait for a connection
+            client_socket, client_address = server_socket.accept() # accept connection
+            # FIX: Pass client_address for logging purposes
+            new_t = threading.Thread(target=thread_main, args=(client_socket, client_address)) # create thread
+            new_t.daemon = True # Make thread daemon so it doesn't prevent server exit
+            new_t.start() # start thread
+            print(f"[SERVER] Accepted connection from {client_address}")
+            
+    except KeyboardInterrupt:
+        print("\n[SERVER] Shutting down.")
+    except Exception as e:
+        print(f"[SERVER ERROR] {e}")
+    finally:
+        server_socket.close()
 
-    while True:    # Wait for a connection
-        client_socket, client_address = server_socket.accept() # accept connection
-        new_t = threading.Thread(target=thread_main, args=(client_socket)) # create thread
-        new_t.start() # start thread
-        print("main")
-
-
-
-def thread_main(client_socket: socket.socket):
+def thread_main(client_socket: socket.socket, client_address):
     """
     thread_main()
-    socket parameter
+    socket parameter, client_address
     user_connect()
-    while socket.recv(2048) ????
+    while socket.recv(2048)
         split message
         match case structure to respond to commands
             exit - user_exit()
@@ -60,69 +67,100 @@ def thread_main(client_socket: socket.socket):
             post - user_post()
             join - user_join()
             leave - user_leave()
+            view - user_view()
     """
-    # connect user
-    username = user_connect(client_socket) # client should prepare to recv() two messages, one for prompt, one for hello
-    # print(ALL_USERS) # test user_connect
-    user_join_time = datetime.datetime.now()
+    username = None
+    user_join_time = None 
+    
+    try:
+        # Connect User and get username
+        username = user_connect(client_socket)
+        
+        # Main Command Loop
+        while True:
+            # Send notifications (if any) before waiting for new command
+            send_notifications(client_socket, username)
+            
+            # get a command from client (blocking call)
+            # FIX: Check for no data, which means a clean disconnect
+            data = client_socket.recv(4096)
+            if not data:
+                break 
+            
+            client_input = data.decode(ENCODE).strip()
+            print(f"[{username}] Received: {client_input}")
+            
+            # FIX: Robust command parsing using split(maxsplit=2)
+            command_parts = client_input.split(' ', 2)
+            command = command_parts[0].lower().replace('%', '') # strip '%' and make lowercase
+            response = ""
 
-    while True:
-        # send messages that are visible to the user
-        if MAIN_GROUP.validate_user(username): # if user is in the main group
-            display_messages(user_join_time, client_socket) # client should adjust recv buffer because it might be a lot more than 1024
-
-        # send notifications to user
-        if MAIN_GROUP.validate_user(username): # if user is in the main gruop, send notifs for that user if there are any
-            send_notifications(client_socket, username) # client should prepare to recv() many times, perhaps with a buffer larger than 1024
-                                                        # but the beginning of each notif says how many remaining notifs there are so client
-                                                        # can loop appropriately
-
-        # get a command from client
-        client_input = client_socket.recv(4096).decode(ENCODE)
-
-        # split data
-        command = client_input[:client_input.find[" "]] # command is everything in data until first space
-        input_remainder = client_input[client_input.find[" "] + 1:] # remainder is everything in data after command, not including space
-
-        # match case command
-        match command:
-            case "exit": # user disconnect
-                user_exit(client_socket, username)
-                return
-            case "message": # user request message contents
-                # client should be prepared to recv() once
-                
-                # validate if user is in group before they can request a message
+            # Command Handling (Original match case structure now implemented with if/elif)
+            if command == "exit": # user disconnect
+                response = "[INFO] Disconnecting..."
+                client_socket.send(response.encode(ENCODE))
+                break # Exit loop, trigger cleanup
+            
+            elif command == "message" and len(command_parts) == 2: # user request message contents
+                # command format: %message ID
+                message_id = command_parts[1]
                 if MAIN_GROUP.validate_user(username):
-                    user_request_message(client_socket, input_remainder)
-                else: # if user not in the group
-                    client_socket.send("You're not part of a group!\n".encode(ENCODE))
-            case "post": # user post message
-                # client should be prepared to recv() once for validation/error reporting
-                
-                # validate if user is in group before they can post a message
+                    response = user_request_message(message_id)
+                else: 
+                    response = "[ERROR] You must join the group before requesting a message."
+
+            elif command == "post" and len(command_parts) >= 3: # user post message
+                # command format: %post subject content
+                subject = command_parts[1]
+                content = command_parts[2]
                 if MAIN_GROUP.validate_user(username):                
-                    user_post(username, input_remainder, client_socket)
+                    response = user_post(username, subject, content)
                 else:
-                    client_socket.send("You're not part of a group!\n".encode(ENCODE))
-            case "join": # user join group
-                # client should be prepared to recv() once
+                    response = "[ERROR] You must join the group before posting."
+                
+            elif command == "join": # user join group
+                # FIX: Record join time *only* if the join is successful
+                join_result = user_join(username)
+                if "[SUCCESS]" in join_result:
+                    user_join_time = datetime.datetime.now()
+                    # Send initial visible messages immediately after joining success message
+                    client_socket.send(join_result.encode(ENCODE))
+                    display_messages(user_join_time, client_socket)
+                    continue # Skip sending join_result again at the end
+                response = join_result
 
-                user_join(client_socket, username)
-            case "leave": # user leave group
-                # client should be prepare to recv() once
-
-                user_leave(client_socket, username)
-            case "view": # user wants to view group
-                # client should be prepared to recv() once
+            elif command == "leave": # user leave group
+                # command format: %leave
+                response = user_leave(username)
+                if "[SUCCESS]" in response:
+                    user_join_time = None
+            
+            elif command == "users": # user wants to view group
+                # command format: %users
                 if MAIN_GROUP.validate_user(username):
-                    user_view(client_socket)
+                    response = user_view()
                 else:
-                    client_socket.send("You are not part of the group!\n".encode(ENCODE))
-            case _:
-                client_socket.send(f"{command} is not a command\n".encode())
+                    response = "[ERROR] You are not part of the group!"
+            
+            # FIX: %connect is client-side logic handled before sending to server
+            elif command == "connect":
+                response = "[INFO] Already connected to server. Use '%join' to enter the main group."
+
+            else:
+                response = f"[ERROR] Unknown command or incorrect format: {client_input}"
+            
+            # Send the command response back to the client
+            client_socket.send(response.encode(ENCODE))
+
+    except ConnectionResetError:
+        print(f"[DISCONNECT] Client {username if username else client_address} forcefully closed the connection.")
+    except Exception as e:
+        print(f"[THREAD ERROR] An error occurred for {username}: {e}")
+    finally:
+        user_exit(client_socket, username)
 
 
+# Helper Functions
 
 def user_exit(client_socket: socket.socket, username):
     """
@@ -132,69 +170,64 @@ def user_exit(client_socket: socket.socket, username):
     for user in users
         user_notify() user that username left
     """
+    if username:
+        # Use LOCK for modifying shared data structures
+        with LOCK:
+            # Remove from global users dict
+            ALL_USERS.pop(username, None)
+            
+            # Remove from group and notify others if they were in the group
+            if MAIN_GROUP.validate_user(username):
+                MAIN_GROUP.remove_user(username)
+                
+                # Notify all remaining users in the group
+                notification = f"[NOTIFY] User {username} left the group."
+                for user in MAIN_GROUP.group_users:
+                    # FIX: Use add_notification instead of direct send
+                    MAIN_GROUP.add_notification(user, notification) 
 
-    # goodbye message? 
+        print(f"[DISCONNECT] User {username} exited gracefully.")
 
-    # close socket
-    client_socket.close()
+    try:
+        # close socket
+        client_socket.close()
+    except:
+        pass
     return
 
 
-
-def user_request_message(client_socket: socket.socket, client_input: str):
+def user_request_message(message_id: str) -> str:
     """
-    pseudocode: 
     (message command)
-    (command format: "message message_id")
-    get message_id from line
     socket.send(message_dict[id].encode())
     """
-
-    # FOR CONSISTENCY, SHOULD THE MESSAGE HAVE AN OPTION LIKE "message -i message_id"?
-
-    # get message_id, should just be remainder of client input
-    message_id = client_input
-
     # validate message id
     if MAIN_GROUP.validate_message_id(message_id):
         # grab message from Group.message_dict
         message: Message.Message = MAIN_GROUP.retrieve_message(message_id)
 
-        # send message
-        client_socket.send(f"Message {message.id}:]\nSubject: {message.subject}\nContent: {message.content}\n".encode(ENCODE))
-    else: # if message doen't exist
-        client_socket.send(f"Message {message_id} does not exist!\n".encode(ENCODE))
-    return
+        # FIX: Send message with full format as required by project
+        message_str = (
+            f"--- Message ID: {message.id} ---\n"
+            f"Sender: {message.username}\n"
+            f"Date: {message.datetime.strftime('%A, %d %B %Y, %I:%M:%S%p')}\n"
+            f"Subject: {message.subject}\n"
+            f"Content: {message.content}"
+        )
+        return message_str
+    else: # if message doesn't exist
+        return f"[ERROR] Message with ID {message_id} does not exist!"
 
 
-
-def user_post(username: str, client_input: str, client_socket: socket.socket):
+def user_post(username: str, subject: str, content: str) -> str:
     """
-    pseudocode: 
     (post command)
-    ("post -s subject -c content)
-    create datetime
     create Message object
     lock acquire
     message_dict[message_id] = Message - CRITICAL SECTION
     lock release
     """
-
-    # client_input should be
-    # "-s subject -c content"
-
-    # get subject and content
-    first_option = client_input[:client_input.find(" ")] # should be "-s"
-    remainder = client_input[client_input.find(" ") + 1:] # remainder of input after first option
-    if first_option != "-s":
-        raise TypeError(f"user_post: first option should be '-s' not {first_option}\n")
-    # ITS POSSIBLE FOR A USER TO PUT A FAKE COMMAND BETWEEN -s AND -c, SHOULD WE VALDIATE THAT INPUT?
-    if " -c " not in remainder:
-        raise TypeError(f"user_post: can't find ' -c ' to indicate message content\n")
-    subject = remainder[:remainder.find(" -c ")] # get subject (everything before -c)
-    content = remainder[remainder.find(" -c ") + 4:] # rest should be content
-                                                     # +4 because that's the length of ' -c '    
-
+    
     # create datetime of post
     curr_datetime = datetime.datetime.now()
 
@@ -203,19 +236,21 @@ def user_post(username: str, client_input: str, client_socket: socket.socket):
 
     # add message to group - CRITICAL SECTION
     LOCK.acquire()
-    MAIN_GROUP.add_message(user_message)
+    message_id = MAIN_GROUP.add_message(user_message)
+    
+    # Notify all users in the group (excluding the sender)
+    notification = f"[NOTIFY] New message from {username} (ID: {message_id}, Subject: {subject})"
+    for user in MAIN_GROUP.group_users:
+        if user != username:
+            MAIN_GROUP.add_notification(user, notification)
+            
     LOCK.release()
 
-    # send message of confirmation to user?
-    client_socket.send("Message posted\n".encode(ENCODE))
-
-    return
+    return f"[SUCCESS] Message posted with ID: {message_id}"
 
 
-
-def user_join(client_socket: socket.socket, username: str):
+def user_join(username: str) -> str:
     """
-    pseudo_code:
     (join a group)
     lock acquire
     Group.group_users[username] = Socket - critical section
@@ -229,19 +264,19 @@ def user_join(client_socket: socket.socket, username: str):
 
     if success:
         # notify users that new user has joined
+        notification = f"[NOTIFY] User {username} joined the group."
+        LOCK.acquire()
         for user in MAIN_GROUP.group_users:
-            MAIN_GROUP.add_notification(user, f"User {username} joined\n")
-        # send message to client that they joined the group
-        client_socket.send("You succesfully joined!\n".encode(ENCODE))
+            if user != username:
+                MAIN_GROUP.add_notification(user, notification)
+        LOCK.release()
+        
+        return "[SUCCESS] You have successfully joined the main group. You will now see the last 2 messages and all subsequent ones."
     else:
-        # notify user that they were unable to join
-        client_socket.send("You were unable to join the group\n".encode(ENCODE))
-
-    return
+        return "[ERROR] You were unable to join the group: You are already part of the group!"
 
 
-
-def user_leave(client_socket: socket.socket, username: str):
+def user_leave(username: str) -> str:
     """
     (leave a group)
     lock acquire
@@ -256,54 +291,56 @@ def user_leave(client_socket: socket.socket, username: str):
 
     if success:
         # notify other users that user left
+        notification = f"[NOTIFY] User {username} left the group."
+        LOCK.acquire()
         for user in MAIN_GROUP.group_users:
-            MAIN_GROUP.add_notification(user, f"User {username} disconnected\n")
+            MAIN_GROUP.add_notification(user, notification)
+        LOCK.release()
         
         # notify user success
-        client_socket.send("You succesfully left!\n".encode(ENCODE))
+        return "[SUCCESS] You have successfully left the group."
     else:
         # notify user failed to leave group
-        client_socket.send("You failed to leave group!\n".encode(ENCODE))
-
-    return
-
+        return "[ERROR] You failed to leave group! You are not currently a member."
 
 
 def user_connect(client_socket: socket.socket):
     """
-    pseudocode: 
-    user_connect()
-        prompt user name
-            socket.send("what is your username".encode())
-            username = socket.recv(2048).decode()
-        lock acquire
-        add to users - CRITICAL SECTION
-        lock release
-        notify other users that someone connected
-            for user in users:
-                user_notify(user, "someone joined")
-        send last 2 messages
+    prompts user for username and adds them to ALL_USERS dictionary.
     """
-    # prompt username
-    client_socket.send("What is your username?".encode(ENCODE))
-    username = client_socket.recv(1024).decode(ENCODE) # receive username
+    while True:
+        try:
+            # prompt username
+            client_socket.send("What is your username?".encode(ENCODE))
+            # receive username
+            username = client_socket.recv(1024).decode(ENCODE).strip() 
+            
+            if not username: continue
 
-    # add to USERS dictionary
-    LOCK.acquire()
-    ALL_USERS[username] = client_socket
-    LOCK.release()
+            # add to USERS dictionary
+            LOCK.acquire()
+            if username in ALL_USERS:
+                LOCK.release()
+                client_socket.send("[ERROR] Username already in use. Please try another.".encode(ENCODE))
+                continue
+            
+            ALL_USERS[username] = client_socket
+            LOCK.release()
 
-    # hello message
-    client_socket.send(f"hello {username}\n".encode(ENCODE))
-    return username
+            # hello message
+            client_socket.send(f"[INFO] Welcome {username}\n[INFO] Use '%join' to enter the main group.".encode(ENCODE))
+            return username
+        except Exception:
+            LOCK.release()
+            raise
 
 
-
-def user_view(client_socket: socket.socket):
+def user_view() -> str:
     """get list of current users in group"""
-    str_of_users = MAIN_GROUP.get_users() # get list of users as string delimited by '\n's
-    client_socket.send(str_of_users.encode(ENCODE)) # set list to client
-
+    with LOCK:
+        str_of_users = MAIN_GROUP.get_users() # get list of users as string delimited by '\n's
+    
+    return f"[INFO] Users in group:\n{str_of_users}"
 
 
 def display_messages(user_join_time: datetime.datetime, client_socket: socket.socket):
@@ -315,51 +352,43 @@ def display_messages(user_join_time: datetime.datetime, client_socket: socket.so
     # get list of messages incl. 2 before join time
     message_list: list[Message.Message] = MAIN_GROUP.get_visible_messages(user_join_time)
 
+    if not message_list:
+        client_socket.send("[INFO] No visible messages found at time of join.".encode(ENCODE))
+        return
+
     # send each message as a list to be displayed by user
     # in format of “Message ID, Sender, Post Date, Subject.”
-    message_str = "" # init message_str
+    message_str = "\n--- Visible Messages (ID, Sender, Post Date, Subject) ---\n" # init message_str
     for message in message_list: # build message_str with list of visible messages
-        message_str = message_str + message.id + ", " + message.username + ", " + message.datetime.strftime("%A, %d %B %Y, %I:%M:%S%p") + ", " + message.subject + "\n" 
+        message_str += (
+            f"{message.id}, {message.username}, "
+            f"{message.datetime.strftime('%A, %d %B %Y, %I:%M:%S%p')}, "
+            f"{message.subject}\n"
+        )
         # e.g. datetime is "Wednesday, 26 November 2025, 3:27:00PM"
         # format str for that is "%A, %d %B %Y, %I:%M:%S%p"
+    message_str += "-----------------------------------------------------"
     
     client_socket.send(message_str.encode(ENCODE)) # send message str
     return 
 
 
-
 def send_notifications(client_socket: socket.socket, username: str):
+    """Retrieves and sends all pending notifications to the client."""
+    notifications: list[str] = []
+    
     # grab list of notifications from Group
-    notifications: list[str] = MAIN_GROUP.get_notifications(username)
-    while notifications:
-        curr_notif = notifications.pop(0)
-        curr_notif = len(notifications) + " " + curr_notif # append len to beginning of notif
-                                                           # to indicate how many remaining notifications there are
-                                                           # so that client can time their .recv(1024)'s right
-                                                           # so search for the first space in the string to separate
-                                                           # the len and actual notif
-        client_socket.send(curr_notif) # send notification
+    with LOCK:
+        if MAIN_GROUP.validate_user(username):
+            # FIX: get_notifications removes them from the group's dictionary
+            notifications = MAIN_GROUP.get_notifications(username) 
+    
+    if notifications:
+        # Combine all notifications into one message block for efficient sending
+        notification_block = "\n".join(notifications)
+        client_socket.send(f"\n--- New Notifications ---\n{notification_block}\n-------------------------\n".encode(ENCODE))
+    
     return
-
-
-
-def test_thread_main(client_socket: socket.socket, client_address):
-    """
-    testing to making sure the server and client can connect
-    """
-    try:
-        print(f"Connection from {client_address}")
-        # Receive the data in small chunks and retransmit it
-        for i in range(5): # repeat 5 times, testing
-            data = client_socket.recv(1024).decode(ENCODE) # receive data
-            if data:
-                print(f"Received: {data}")
-                client_socket.sendall(data.encode(ENCODE))  # Echo back the received data
-            print("while")
-    finally:
-        # Clean up the connection
-        client_socket.close()
-
 
 
 if __name__ == "__main__":
