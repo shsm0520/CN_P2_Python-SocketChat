@@ -19,6 +19,9 @@ LOCK = threading.Lock()
 ALL_GROUPS: dict[str, Group.Group] = {}
 ALL_GROUPS['main'] = Group.Group() 
 ALL_GROUPS['general'] = Group.Group() 
+ALL_GROUPS['sub_1'] = Group.Group()
+ALL_GROUPS['sub_2'] = Group.Group() 
+ALL_GROUPS['sub_3'] = Group.Group()  
 print(f"Initialized Groups: {list(ALL_GROUPS.keys())}")
 
 
@@ -126,6 +129,14 @@ def thread_main(client_socket: socket.socket, client_address):
                 message_id = command_parts[2]
                 response = group_request_message(group_id, username, message_id)
 
+            elif command == "grouplist" and len(command_parts) == 2:
+                group_id = command_parts[1]
+                if group_id in user_group_join_time:
+                    display_messages(group_id, user_group_join_time[group_id], client_socket)
+                    response = f"[INFO] Messages Listed."
+                else:
+                    response = f"[ERROR] You must join group '{group_id}' to list messages."
+
             # Command Aliases (Map to 'main' group)
             elif command == "join": # %join -> %groupjoin main
                 response, join_time = group_join('main', username)
@@ -152,6 +163,14 @@ def thread_main(client_socket: socket.socket, client_address):
             elif command == "message" and len(command_parts) == 2: # %message ID -> %groupmessage main ID
                 message_id = command_parts[1]
                 response = group_request_message('main', username, message_id)
+
+            elif command == "list" and len(command_parts) == 1:
+                group_id = "main"
+                if group_id in user_group_join_time:
+                    display_messages(group_id, user_group_join_time[group_id], client_socket)
+                    response = f"[INFO] Messages Listed."
+                else:
+                    response = f"[ERROR] You must join group '{group_id}' to list messages."
             
             # General Commands
             elif command == "exit": 
@@ -274,6 +293,7 @@ def display_messages(group_id: str, user_join_time: datetime.datetime, client_so
     
     if not message_list:
         client_socket.send(f"[INFO] Group '{group_id}' is empty.".encode(ENCODE))
+        print("messages listed") #TESTING
         return
 
     history_output = [f"--- Group: {group_id} History ---"]
@@ -284,6 +304,8 @@ def display_messages(group_id: str, user_join_time: datetime.datetime, client_so
     history_output.append("--------------------------------")
     
     client_socket.send("\n".join(history_output).encode(ENCODE))
+
+    print("messages listed") #TESTING
 
 # Group Command Implementations
 
