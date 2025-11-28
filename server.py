@@ -293,7 +293,6 @@ def display_messages(group_id: str, user_join_time: datetime.datetime, client_so
     
     if not message_list:
         client_socket.send(f"[INFO] Group '{group_id}' is empty.".encode(ENCODE))
-        print("messages listed") #TESTING
         return
 
     history_output = [f"--- Group: {group_id} History ---"]
@@ -305,7 +304,6 @@ def display_messages(group_id: str, user_join_time: datetime.datetime, client_so
     
     client_socket.send("\n".join(history_output).encode(ENCODE))
 
-    print("messages listed") #TESTING
 
 # Group Command Implementations
 
