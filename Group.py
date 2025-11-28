@@ -1,127 +1,121 @@
 """
-Group: class
-    list of group_users: list of usernames in group
-    message_dict: dict message_id->Message object
+Group.py: Class Definition for a Single Group/Message Board
+
+This class encapsulates all state and core logic for one independent bulletin board group.
+It is designed to be reusable; the server instantiates multiple Group objects (e.g., 'main', 'general').
 """
 
 import Message
 import datetime
-import threading # Added import for clarity, though not used in Group itself
+import threading
 
 class Group:
+    """Manages the users, messages, and notifications for one group."""
+    
     def __init__(self):
-        # FIX: Changed initialization from {} to [] as it is used with .append/.remove
-        self.group_users: list[str] = [] # list of usernames in group
-        self.message_dict: dict[str, Message.Message] = {} # dict of messages of form "message_id: Message"
-        self.datetime_message_dict: dict[datetime.datetime, Message.Message] = {} # i know it's not memory efficient but it works and it's easier to code...
-                                                                                   # dict of messages of form "datetime_of_message: Message"
-        self.curr_message_id = 0 # initialize message id, used to keep track of message id's
-                                 # message_id's are strings as they're stored in the message_dict  
-                                 # and in the message object, but kept as int in Group so it can be incremented easier
-        self.notifications: dict[str, list[str]] = {} # dict to organize how to distribute notifications
-                                                      # usernames are keys, and list of notifications for that user are values
-                               # username:str -> list[notifaction: str]
+        # List of usernames currently joined to this group
+        self.group_users: list[str] = [] 
+        
+        # Primary message storage: Maps message ID (str) -> Message object
+        self.message_dict: dict[str, Message.Message] = {} 
+        
+        # Chronological message storage: Maps datetime -> Message object. Used for efficient
+        # retrieval based on time (required by message visibility logic)
+        self.datetime_message_dict: dict[datetime.datetime, Message.Message] = {}                                                                                
+        
+        # Counter to generate the next sequential unique message ID for *this group only*
+        self.curr_message_id = 0 
+        
+        # Notification queue: Maps username (key) -> list of pending notification strings (value)
+        # This is where notifications wait until the user's thread polls for them
+        self.notifications: dict[str, list[str]] = {} 
 
-    def add_user(self, username: str): # CRITICAL SECTION (I think? Yes, when modifying the list)
-        if username not in self.group_users: # check if user in group before appending
+    def add_user(self, username: str): 
+        """Adds a user to the group if they are not already a member."""
+        if username not in self.group_users: 
             self.group_users.append(username)
             return True
         return False
 
     def remove_user(self, username: str):
-        if username in self.group_users: # check first if user is in group
-            self.group_users.remove(username) # remove username
+        """Removes a user from the group and purges their notification queue."""
+        if username in self.group_users: 
+            self.group_users.remove(username) 
             self.notifications.pop(username, None) # Remove any pending notifications for the leaving user
             return True
         return False
 
     def validate_user(self, username: str):
-        """
-        check if user in group
-        """
+        """Checks membership status."""
         return username in self.group_users
     
     def get_users(self):
-        """return string of all users to be printed if user wants to view list of users in group"""
+        """Returns a string representation of all users for the %users command."""
+        return "\n".join(self.group_users)
 
-        str_of_users = ""
-        for user in self.group_users:
-            # FIX: Added newline to the end for cleaner printing on the client side
-            str_of_users = str_of_users + user + "\n"
-        return str_of_users
-
-    def add_message(self, message: Message.Message): # CRITICAL SECTION (i think? Yes, when modifying dicts/id)
-        # set message id
-        message_id_str = str(self.curr_message_id) # Store ID before increment
+    def add_message(self, message: Message.Message): 
+        """Assigns ID, stores message, and updates history structures."""
+        
+        message_id_str = str(self.curr_message_id) 
         message.set_id(message_id_str) 
 
-        # add message to dict of messages
         self.message_dict[message_id_str] = message
-
-        # increment curr_message_id
         self.curr_message_id = self.curr_message_id + 1 
 
-        # add to datetime_message_dict and sort (for displaying visible messages to user in get_visible_messages())
+        # Add to time-based dict and ensure it remains sorted by datetime
         self.datetime_message_dict[message.datetime] = message
-        
-        # but retained for functional sorting guarantee.
-        self.datetime_message_dict = dict(sorted(self.datetime_message_dict.items())) # sort self.datetime_m_d by keys (dates)
-                                                                                      # i think its in ascending order earliest to latest
-        return message_id_str # Return the new ID for posting confirmation
+        self.datetime_message_dict = dict(sorted(self.datetime_message_dict.items())) 
+                                                                                      
+        return message_id_str 
 
     def retrieve_message(self, message_id: str):
-        """
-        like when a user requests a message id to view its content
-        """
-        # FIX: Use .get() for safe retrieval, returning None if not found
+        """Retrieves a message object by ID."""
         return self.message_dict.get(message_id)
 
     def validate_message_id(self, message_id: str):
-        """
-        check if message id exists in the dict
-        """
+        """Checks message existence."""
         return message_id in self.message_dict
     
     def get_visible_messages(self, join_time: datetime.datetime) -> list[Message.Message]:
-        datetime_message_keys: list[datetime.datetime] = list(self.datetime_message_dict.keys()) # list of datetimes
-        datetime_message_values: list[Message.Message] = list(self.datetime_message_dict.values()) # parallel list of Message's
+        """
+        Implements the message visibility rule:
+        Returns the 2 messages posted immediately BEFORE the join_time, plus ALL messages posted AFTER the join_time.
+        """
+        datetime_message_keys: list[datetime.datetime] = list(self.datetime_message_dict.keys()) 
+        datetime_message_values: list[Message.Message] = list(self.datetime_message_dict.values()) 
 
-        index = len(datetime_message_keys) # set index to max length. FIX: Removed -1 as it causes issues.
-
-        # if 0 messages, return empty list
         if not datetime_message_keys:
             return []
         
-        # if <= 2 messages, return them no matter what
+        # Simple case: if 2 or fewer messages exist, show all
         if len(datetime_message_keys) <= 2:
             return datetime_message_values
         
-        # if > 3 messages, return all that are after join_time and the two before join_time
-        # Find the index of the first message posted *after* the join_time
-        for i in range(len(datetime_message_keys)):
-            if join_time < datetime_message_keys[i]: # the first time that join_time < keys, store the index, and break the loop
-                                                     # keys should already be sorted in ascending order of datetime
+        # Find the index of the first message posted *strictly after* the join_time
+        index = len(datetime_message_keys) 
+        for i, dt in enumerate(datetime_message_keys):
+            if join_time < dt: 
                 index = i
                 break
         
-        # at this point, index is now the index that is first after the join_time (or len if no message is newer)
-        # so everything after index including index is sent to the user
-        # and the two before the index are sent to the user
-        
-        # Start index is 2 before the 'newer than join_time' messages, or 0 if less than 2 exist before that point
+        # Calculate the starting index: 2 positions before the first 'new' message
+        # max(0, ...) ensures the index does not go below 0
         start_index = max(0, index - 2)
-        return datetime_message_values[start_index:] # this should be a list of messages incl. 2 before join date
+        
+        # Return the slice containing the 2 prior messages and all subsequent messages
+        return datetime_message_values[start_index:] 
     
-    def add_notification(self, username: str, notification: str): # CRITICAL SECTION
-        # FIX: Corrected logic to ensure list is initialized and appended to
-        # add notification for user to self.notifications
+    # Notification logic
+    def add_notification(self, username: str, notification: str): 
+        """Queues a notification for a specific user."""
+        # Initialize list if user has no notification list, then append
         if username not in self.notifications:
             self.notifications[username] = []
         self.notifications[username].append(notification)
 
-    # FIX: Corrected signature - 'notification: str' was removed as it's not needed for getting.
-    def get_notifications(self, username: str) -> list[str]: # CRITICAL SECTION
-        if username in self.notifications: # first check if user is in notifications
-            return self.notifications.pop(username) # returns list of notifications for that user and removes the entry
-        else: # return empty list of no entry for that user
-            return []
+    def get_notifications(self, username: str) -> list[str]: 
+        """
+        Retrieves all pending notifications for a user and CLEARS the queue.
+        Uses pop(key, default) for atomic retrieval and removal (polling).
+        """
+        return self.notifications.pop(username, [])

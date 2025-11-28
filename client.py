@@ -2,32 +2,31 @@ import socket
 import threading
 import sys
 import time
-import re # Added for parsing the %connect command
+import re 
+from typing import Optional 
 
-# Global variables for connection state
+# Global configuration and state
 ENCODE = 'UTF-8'
 is_connected = False
-client_socket: socket.socket = None
-# Added global for username to allow the listener to reference it if needed for context
-USERNAME = None 
+client_socket: Optional[socket.socket] = None
+USERNAME: Optional[str] = None 
 
 def receive_handler(sock: socket.socket):
     """
-    Listener thread: Stays blocked on sock.recv() to continuously listen 
-    for and print server-sent messages and notifications.
+    Listener Thread (Background): Stays blocked on sock.recv() to continuously listen 
+    for and print server-sent messages and asynchronous notifications.
     """
     global is_connected
     while is_connected:
         try:
-            # The .recv() call will block, waiting for server data
+            # Blocks here waiting for data (response or notification block) from the server
             data = sock.recv(8192).decode(ENCODE) 
             
             if data:
-                # Print the server's message/notification/response
-                # Use sys.stdout.write to print above the current input prompt
+                # Print the server output on a new line
                 sys.stdout.write(f"\n{data.strip()}\n")
                 
-                # Redraw the input prompt line
+                # Redraw the input prompt ("> ") so it appears after the output
                 sys.stdout.write("> ")
                 sys.stdout.flush() 
             else:
@@ -40,7 +39,6 @@ def receive_handler(sock: socket.socket):
             is_connected = False
             break
         except Exception:
-            # Handle other errors (like socket closure from main thread)
             if is_connected:
                 print("\n[ERROR] An unknown receive error occurred.")
             is_connected = False
@@ -48,41 +46,36 @@ def receive_handler(sock: socket.socket):
         
 def cli_handler(sock: socket.socket):
     """
-    Main thread: Handles user command input and sends commands to the server.
+    Main Thread (Foreground): Handles user command input and sends commands to the server.
+    This thread is blocked whenever the program waits for user input.
     """
     global is_connected
     while is_connected:
         try:
-            # The input() call will block, waiting for user input
+            # Blocks here until the user types a command and presses Enter
             command_line = input("> ")
             
             if not command_line:
                 continue
 
-            # Handle commands locally before sending (e.g., the initial %connect is handled in main)
             command_parts = command_line.split(' ', 1)
             command = command_parts[0].lower()
             
             if command == '%connect':
-                 # Already handled in main() before the loop starts
-                 print("[INFO] Already connected. Use '%join' or other commands.")
+                 print("[INFO] Already connected. Use '%groups' to see available groups.")
                  continue
 
-            # Send commands to server
+            # Send the raw command string to the server
             sock.send(command_line.encode(ENCODE))
             
-            # Check for the exit command to gracefully close
             if command == '%exit':
-                # Give server a moment to send the final response
                 time.sleep(0.5) 
                 is_connected = False
                 break
                 
         except EOFError:
-            # User hit Ctrl+D/Ctrl+Z
             print("\n[INFO] Exiting client.")
             is_connected = False
-            # Send exit command to server to trigger cleanup
             if sock:
                 sock.send(f"%exit".encode(ENCODE))
             break
@@ -96,13 +89,12 @@ def main():
     host = '127.0.0.1'
     port = 6789
     
-    # Handle %connect command before main loop
+    # Handle %connect command and socket initialization
     while not is_connected:
         connect_command = input("Enter connection command (e.g., %connect 127.0.0.1 6789): ")
         
-        # Use regex to validate and parse the command
         match = re.match(r"%connect\s+(\S+)\s+(\d+)", connect_command)
-        
+
         if match:
             host = match.group(1)
             try:
@@ -124,17 +116,15 @@ def main():
         else:
             print("[ERROR] Invalid command format. Use: %connect address port")
 
-    # Handle username exchange if connected
-    if is_connected:
+    # Handle initial username exchange and validation
+    if is_connected and client_socket:
         try:
-            # Handle the initial username prompt from the server
             initial_prompt = client_socket.recv(1024).decode(ENCODE).strip()
-            # Loop until a valid/unique username is accepted
             while True:
                 USERNAME = input(initial_prompt)
                 client_socket.send(USERNAME.encode(ENCODE))
 
-                # Receive server's response (either welcome or error)
+                # Wait for server response (validation or error)
                 response = client_socket.recv(4096).decode(ENCODE)
                 if "[ERROR] Username already in use" in response:
                     print(response)
@@ -142,15 +132,15 @@ def main():
                     print(f"\n{response.strip()}")
                     break
             
-            # Start the listener thread (runs in background)
+            # Start the non-blocking listener thread
             listener_thread = threading.Thread(target=receive_handler, args=(client_socket,))
             listener_thread.daemon = True 
             listener_thread.start()
 
-            # Run the command handler in the main thread
+            # Run the main command handler
             cli_handler(client_socket)
             
-            # Wait for the listener thread to pick up any final messages/exit confirmations
+            # Wait for the listener thread to clean up
             listener_thread.join(timeout=1.0) 
 
         except KeyboardInterrupt:
@@ -160,7 +150,6 @@ def main():
         except Exception as e:
             print(f"[FATAL ERROR] Client failed during operation: {e}")
         finally:
-            # Cleanup
             if client_socket:
                 try:
                     client_socket.close()
